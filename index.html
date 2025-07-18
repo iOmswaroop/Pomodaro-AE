@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pomodoro: Apocalypse Edition</title>
+    <link rel="manifest" href="manifest.json">
+    <style>
+        :root {
+            --bg-color: #000000;
+            --text-color: #00ff00;
+            --button-bg: #111;
+            --button-hover: #222;
+        }
+        body {
+            margin: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            transition: background-color 0.5s ease;
+        }
+        button, select, input[type="number"] {
+            background: var(--button-bg);
+            color: var(--text-color);
+            border: none;
+            padding: 15px;
+            margin: 5px;
+            font-size: 1.2em;
+            border-radius: 5px;
+            transition: all 0.3s ease;
+        }
+        button:hover {
+            background: var(--button-hover);
+            transform: scale(1.05);
+        }
+        #timer {
+            font-size: clamp(3rem, 15vw, 10rem);
+            transition: all 0.5s ease;
+        }
+        #progress {
+            width: 100%;
+            height: 10px;
+            background: green;
+            transition: width 0.5s ease;
+        }
+        #history-button {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+        }
+        #history-modal, #completion-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            color: var(--text-color);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 10;
+        }
+        #history-modal-content, #completion-modal-content {
+            background: var(--button-bg);
+            padding: 20px;
+            border-radius: 10px;
+            max-height: 80%;
+            overflow-y: auto;
+        }
+        .hidden {
+            display: none !important;
+        }
+        @media (max-width: 600px) {
+            button, select, input[type="number"] {
+                width: 90%;
+                font-size: 1.5em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>Pomodoro: Apocalypse Edition</h1>
+    <div id="controls">
+        <label>Work: <select id="workDuration"></select></label>
+        <label>Break: <select id="breakDuration"></select></label>
+        <label>Session Goal: <input type="number" id="sessionGoal" value="4"></label>
+        <label>Auto-Restart: <input type="checkbox" id="autoRestart"></label>
+    </div>
+    <div id="phaseIndicator">Idle</div>
+    <div id="timer">00:00</div>
+    <div id="progress"></div>
+    <button onclick="startTimer()">Start</button>
+    <button onclick="togglePause()">Pause</button>
+    <button onclick="resetTimer()">Reset</button>
+    <button onclick="toggleFullscreen()">Fullscreen</button>
+    <button id="history-button" onclick="toggleHistoryModal()">🗓️</button>
+    <audio id="alarmSound" loop></audio>
+    <div id="history-modal">
+        <div id="history-modal-content">
+            <h2>History</h2>
+            <div id="history-content"></div>
+            <button onclick="confirmClearHistory()">Clear History</button>
+            <button onclick="toggleHistoryModal()">Close</button>
+        </div>
+    </div>
+    <div id="completion-modal">
+        <div id="completion-modal-content">
+            <h2>Task Complete</h2>
+            <p id="completion-text"></p>
+            <button onclick="closeCompletionModal()">Close</button>
+        </div>
+    </div>
+<script>
+    const alarmSounds = { alarm1: "https://actions.google.com/sounds/v1/alarms/beep_short.ogg" };
+    let state = { remaining: 0, total: 0, work: true, paused: false, count: 0 };
+    let interval;
+    let wakeLock;
+
+    function populateSelects() {
+        for (let i = 5; i <= 90; i += 5) document.getElementById('workDuration').innerHTML += `<option value="\${i}">\${i} min</option>`;
+        for (let i = 0; i <= 30; i += 5) document.getElementById('breakDuration').innerHTML += `<option value="\${i}">\${i} min</option>`;
+    }
+
+    function requestWakeLock() {
+        if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then(lock => wakeLock = lock).catch(() => {});
+    }
+
+    function startTimer() {
+        let workMinutes = parseInt(document.getElementById('workDuration').value);
+        state = { remaining: workMinutes * 60, total: workMinutes * 60, work: true, paused: false, count: 0 };
+        clearInterval(interval);
+        interval = setInterval(countdown, 1000);
+        requestWakeLock();
+        saveState();
+        document.getElementById('controls').classList.add('hidden');
+        document.querySelector('button[onclick="startTimer()"]').classList.add('hidden');
+        document.querySelector('button[onclick="toggleFullscreen()"]').classList.add('hidden');
+    }
+
+    function countdown() {
+        if (!state.paused && state.remaining > 0) {
+            state.remaining--;
+            updateDisplay();
+            saveState();
+        } else if (state.remaining === 0) handlePhaseEnd();
+    }
+
+    function handlePhaseEnd() {
+        if (state.work) { playAlarm(5); showCompletionModal(state.total / 60); } else { playAlarm(5); }
+        clearInterval(interval);
+        logHistory();
+        if (state.work) {
+            let breakMin = parseInt(document.getElementById('breakDuration').value);
+            state = { ...state, remaining: breakMin * 60, total: breakMin * 60, work: false };
+        } else {
+            state.count++;
+            if (state.count >= parseInt(document.getElementById('sessionGoal').value)) return resetTimer();
+            if (document.getElementById('autoRestart').checked) {
+                let workMin = parseInt(document.getElementById('workDuration').value);
+                state = { ...state, remaining: workMin * 60, total: workMin * 60, work: true };
+            } else return resetTimer();
+        }
+        interval = setInterval(countdown, 1000);
+        saveState();
+    }
+
+    function togglePause() {
+        state.paused = !state.paused;
+        document.querySelector('button[onclick="togglePause()"]').textContent = state.paused ? 'Resume' : 'Pause';
+        saveState();
+    }
+
+    function resetTimer() {
+        clearInterval(interval);
+        state = { remaining: 0, total: 0, work: true, paused: false, count: 0 };
+        localStorage.removeItem('pomodoroState');
+        updateDisplay();
+        document.getElementById('controls').classList.remove('hidden');
+        document.querySelector('button[onclick="startTimer()"]').classList.remove('hidden');
+        document.querySelector('button[onclick="toggleFullscreen()"]').classList.remove('hidden');
+    }
+
+    function updateDisplay() {
+        let min = Math.floor(state.remaining / 60).toString().padStart(2, '0');
+        let sec = (state.remaining % 60).toString().padStart(2, '0');
+        document.getElementById('timer').textContent = `\${min}:\${sec}`;
+        document.getElementById('phaseIndicator').textContent = state.work ? 'Work' : 'Break';
+        document.getElementById('progress').style.width = `\${100 * (1 - state.remaining / state.total)}%`;
+    }
+
+    function saveState() { localStorage.setItem('pomodoroState', JSON.stringify(state)); }
+
+    function loadState() {
+        let s = localStorage.getItem('pomodoroState');
+        if (s) state = JSON.parse(s);
+        updateDisplay();
+    }
+
+    function playAlarm(durationSeconds) {
+        const audio = document.getElementById("alarmSound");
+        audio.src = alarmSounds.alarm1;
+        audio.loop = true;
+        audio.play();
+        if (navigator.vibrate) navigator.vibrate([500]);
+        setTimeout(() => { audio.pause(); audio.loop = false; }, durationSeconds * 1000);
+    }
+
+    function logHistory() {
+        if (!state.work) return;
+        const today = new Date().toISOString().split('T')[0];
+        let history = JSON.parse(localStorage.getItem('pomodoroHistory') || '{}');
+        history[today] = (history[today] || 0) + (state.total / 60);
+        localStorage.setItem('pomodoroHistory', JSON.stringify(history));
+    }
+
+    function displayHistory() {
+        let history = JSON.parse(localStorage.getItem('pomodoroHistory') || '{}');
+        let html = '';
+        for (const date in history) html += `<div>\${date}: \${history[date]} minutes</div>`;
+        document.getElementById('history-content').innerHTML = html;
+    }
+
+    function confirmClearHistory() {
+        if (confirm("Are you sure you want to clear your history?")) {
+            localStorage.removeItem('pomodoroHistory');
+            displayHistory();
+        }
+    }
+
+    function toggleFullscreen() {
+        if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+        else document.exitFullscreen();
+    }
+
+    function toggleHistoryModal() {
+        const modal = document.getElementById('history-modal');
+        modal.style.display = modal.style.display === 'flex' ? 'none' : 'flex';
+        if (modal.style.display === 'flex') displayHistory();
+    }
+
+    function showCompletionModal(minutes) {
+        document.getElementById('completion-text').textContent = `You completed \${minutes} minutes of focused work.`;
+        document.getElementById('completion-modal').style.display = 'flex';
+    }
+
+    function closeCompletionModal() {
+        document.getElementById('completion-modal').style.display = 'none';
+    }
+
+    document.addEventListener('keydown', e => {
+        if (e.key === ' ') togglePause();
+        if (e.key === 'f') toggleFullscreen();
+    });
+
+    populateSelects();
+    loadState();
+
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./service-worker.js');
+</script>
+</body>
+</html>
